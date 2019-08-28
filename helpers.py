@@ -125,21 +125,38 @@ def collect_data_from_ticker(ticker):
 
     con = pdblp.BCon(timeout=50000)
     con.start()
-    df = pd.DataFrame(columns=['Date'])
     
     print('Collecting data of', con.ref(ticker,'ID_BB_ULTIMATE_PARENT_CO_NAME')['value'][0],'for bond :',con.ref(ticker,'SECURITY_NAME')['value'][0],'\n')
     
     issue_date = con.ref(ticker,'ISSUE_DT')['value'][0].strftime("%Y%m%d")
     intermediate_dates = get_date_range(issue_date,TODAY_DATE)
+    df = pd.DataFrame(intermediate_dates,columns=['date'])
     
-    
-    # D/E ratio, Curr_Assets/Curr_Liabilities, EPS, ROA, ROE, EBITDA/REVENUE,
-    # DAYS TO MATURITY, DAYS TO NEXT COUPON, CALLABILITY, SENIORITY, COUPON TYPE
-    # VOLATILITY_360D,VOLATILITY_90D,VOLATILITY_30D
-    features = ['TOT_DEBT_TO_TOT_EQY','CUR_RATIO','IS_EPS','RETURN_ON_ASSET','RETURN_COM_EQY','EBITDA_TO_REVENUE',
-                'DAYS_TO_MTY_TDY','DAYS_TO_NEXT_COUPON','CALLABLE','NORMALIZED_PAYMENT_RANK','CPN_TYP','CPN_FREQ',
-               'VOLATILITY_360D','VOLATILITY_90D','VOLATILITY_30D']
+    # D/E ratio, Curr_Assets/Curr_Liabilities, EPS, ROA, ROE, EBITDA/REVENUE
+    financial_features = ['TOT_DEBT_TO_TOT_EQY','CUR_RATIO','IS_EPS','RETURN_ON_ASSET','RETURN_COM_EQY','EBITDA_TO_REVENUE']
 
+    # DAYS TO MATURITY, DAYS TO NEXT COUPON, CALLABILITY, SENIORITY, COUPON TYPE
+    bond_features = ['ISSUE_DT','MATURITY','CALLABLE','NORMALIZED_PAYMENT_RANK','CPN_TYP','CPN_FREQ']
+    
+    # Composite ratings + changes
+    print('**** Collecting bloomberg composite ratings ****')
+    for i,day in enumerate(intermediate_dates):
+    
+        row = con.ref(ticker,'BB_COMPOSITE',ovrds=[('RATING_AS_OF_DATE_OVERRIDE', day)])
+        current_rating = row['value'][0]
+        df.loc[i,'BB_COMPOSITE'] = current_rating
+
+        if(i>0):
+            previous_rating = df['BB_COMPOSITE'][i-1]
+            comparison = compare_ratings_fitch(current_rating,previous_rating)
+            if(comparison==1):
+                print('Upgrade from bloomberg composite on',day,'from',previous_rating,'to',current_rating)
+            if(comparison==-1):
+                print('Downgrade from bloomberg composite on',day,'from',previous_rating,'to',current_rating)
+                
+            df.loc[i,'RTG_COMPOSITE_CHANGE']=comparison
+    
+    
     # S&P ratings + changes
     print('**** Collecting S&P ratings ****')
     for i,day in enumerate(intermediate_dates):
@@ -196,8 +213,8 @@ def collect_data_from_ticker(ticker):
             
             df.loc[i,'RTG_MOODY_CHANGE']=comparison
     
-    #Adding features to the dataframe
-    for feature in features :
+    #Adding financial features to the dataset
+    for feature in financial_features :
         print('**** Collecting', feature ,'****')
         for i,day in enumerate(intermediate_dates):
     
@@ -205,14 +222,28 @@ def collect_data_from_ticker(ticker):
             value = row['value'][0]
             df.loc[i,feature] = value
     
+    #Adding bond features to the dataset
+    for feature in bond_features:
+        print('**** Collecting', feature ,'****')
+        value = con.ref(ticker,feature)['value'][0]
+        df[feature]=value
+
+    df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+    df.set_index(df['date'], inplace=True)
+    df = df.drop(columns=['date'])
     df.to_csv('no_price'+ticker+'.csv')
     
     #Adding the price of the security at the end of the day
     print('**** Collecting historical prices **** ')
     price_df = con.bdh(ticker, 'PX_LAST',issue_date, TODAY_DATE)
+    price_df.columns=['PX_LAST']
+    price_df = price_df.reset_index()
+    price_df['date'] = pd.to_datetime(price_df['date'])
+    price_df.set_index(price_df['date'], inplace=True)
+    price_df = price_df.drop(columns=['date'])
     price_df.to_csv('price'+ticker+'.csv')
     
-    final_df = df.join(price_df)
+    final_df = df.merge(price_df,on='date',how='inner')
     
     final_df.to_csv(ticker+'.csv')
     print('CSV file for ticker ',ticker,'created')
